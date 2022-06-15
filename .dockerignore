@@ -1,0 +1,30 @@
+# Editors
+.idea/
+.vscode/
+
+# Byte-compiled / optimized / DLL files
+**/__pycache__
+**/*.pyc
+**/*.class
+
+# Git
+**/.git*
+
+# Logs
+**/*.log
+
+# Environments
+**/.env*
+**/.venv*
+**/env
+**/venv
+
+# Tests
+**/.pytest*
+
+# Docker
+docker-compose*
+
+# Project
+Makefile*
+README*
