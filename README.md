@@ -7,5 +7,6 @@
 
 ### Build and start the development stand. By default, the server runs on `ws://localhost:8899/`
     make run
+    make create_db_schema
 ### Teardown
     make docker_rm_all
