@@ -1,20 +1,23 @@
 import json
 import typing as t
+from random import randint
 
 from fastapi import Depends, WebSocket
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 import app.db.models as m
 import app.schemas as s
+from app.config import settings
 from app.db.session import get_db_session
 from app.logging import logger
-from app.schemas.enum import BattleStatus
+from app.schemas.enum import BattleStatus, RockPaperScissorsChoice
 from app.ws import messenger, Messenger
 
 
-class BattleApp:
+class BattleService:
     db_session: AsyncSession
     messenger: Messenger
 
@@ -164,10 +167,10 @@ class BattleApp:
         battle = m.Battle(
             accept_id=db_accept.accept_id,
             status=BattleStatus.ACTIVE,
-        )
-        battle.log = battle.get_battle_start_log(
-            offer_creator.user_id,
-            offer_acceptor.user_id
+            log=self._get_battle_start_log(
+                offer_creator.user_id,
+                offer_acceptor.user_id
+            )
         )
         self.db_session.add(battle)
         await self.db_session.commit()
@@ -190,23 +193,23 @@ class BattleApp:
                     'battleId': move.battle_id,
                 }
             })
-        ok, message = battle.check_battle_move(move)
+        ok, message = self._check_battle_move(battle, move)
         if not ok:
             return await ws.send_json(message)
 
         # update battle round info
-        battle.add_battle_move(move)
-        if battle.is_full_battle_round:
-            battle.update_battle_round_winner()
+        self._add_battle_move(battle, move)
+        if self._is_full_battle_round(battle):
+            self._update_battle_round_winner(battle)
             await self.db_session.commit()
-            user_ids, payload = battle.generate_battle_round_info()
+            user_ids, payload = self._generate_battle_round_info(battle)
             # send information about the finished round to users
             await self.messenger.send_to_users(user_ids, payload)
             # check if the battle is over
-            battle.update_battle_winner()
+            self._update_battle_winner(battle)
             await self.db_session.commit()
             if battle.log['winner'] is not None:
-                user_ids, payload = battle.generate_battle_info()
+                user_ids, payload = self._generate_battle_info(battle)
                 # send information about the finished battle to users
                 await self.messenger.send_to_users(user_ids, payload)
         else:
@@ -255,3 +258,214 @@ class BattleApp:
             await self.db_session.commit()
 
         return user
+
+    @staticmethod
+    def _get_battle_start_log(
+        offer_creator_id: int,
+        offer_acceptor_id: int
+    ) -> dict[str, t.Any]:
+        return {
+            'users': {
+                'offer_creator': offer_creator_id,
+                'offer_acceptor': offer_acceptor_id,
+            },
+            'current_round': 0,
+            'rounds': {
+                0: {
+                    'answers': [],
+                    'round_winner': None,
+                    'round_damage': 0,
+                },
+            },
+            'winner': None,
+        }
+
+    @staticmethod
+    def _check_battle_move(
+        battle: m.Battle,
+        move: s.BattleMove
+    ) -> tuple[bool, t.Optional[dict[str, t.Any]]]:
+        # user permissions
+        if move.user_id not in battle.log['users'].values():
+            return False, {
+                'error': 'You have not access to battle',
+                'payload': {
+                    'battleId': move.battle_id,
+                }
+            }
+        # battle status
+        if battle.status is not BattleStatus.ACTIVE:
+            return False, {
+                'error': 'Battle is already over',
+                'payload': {
+                    'battleId': move.battle_id,
+                }
+            }
+        # round number
+        if (
+            move.round != battle.current_round
+            or any(
+                item['user_id'] == move.user_id
+                for item in battle.log['rounds'][str(battle.current_round)]['answers']
+            )
+        ):
+            return False, {
+                'error': 'Wrong battle round number',
+                'payload': {
+                    'battleId': move.battle_id,
+                }
+            }
+
+        return True, None
+
+    @staticmethod
+    def _is_full_battle_round(battle: m.Battle) -> bool:
+        return len(battle.log['rounds'][str(battle.current_round)]['answers']) == 2
+
+    @staticmethod
+    def _add_empty_battle_round(battle: m.Battle) -> None:
+        rounds = battle.log['rounds']
+        current_round = str(battle.current_round)
+        if current_round not in rounds:
+            rounds[current_round] = {
+                'answers': [],
+                'round_winner': None,
+            }
+        battle.log['rounds'] = rounds
+        flag_modified(battle, 'log')
+
+    def _add_battle_move(self, battle: m.Battle, move: s.BattleMove) -> None:
+        rounds = battle.log['rounds']
+        current_round = str(battle.current_round)
+        if current_round not in rounds:
+            self._add_empty_battle_round(battle)
+        rounds[current_round]['answers'].append({
+            'user_id': move.user_id,
+            'choice': move.choice.value,
+        })
+        battle.log['rounds'] = rounds
+        flag_modified(battle, 'log')
+
+    def _update_battle_round_winner(self, battle: m.Battle) -> None:
+        battle_round: dict[str, t.Union[list[dict[str, int]], int]] = (
+            battle.log['rounds'][str(battle.current_round)]
+        )
+        #TODO Refactoring
+        u1, u2 = battle_round['answers']
+        u1_choice, u2_choice = u1['choice'], u2['choice']
+        if u1_choice == u2_choice:
+            return
+
+        # find round winner
+        round_winner = None
+        if u1_choice == RockPaperScissorsChoice.ROCK:
+            if u2_choice == RockPaperScissorsChoice.PAPER:
+                round_winner = u2['user_id']
+            else:
+                round_winner = u1['user_id']
+        elif u1_choice == RockPaperScissorsChoice.PAPER:
+            if u2_choice == RockPaperScissorsChoice.ROCK:
+                round_winner = u1['user_id']
+            else:
+                round_winner = u2['user_id']
+        elif u1_choice == RockPaperScissorsChoice.SCISSORS:
+            if u2_choice == RockPaperScissorsChoice.ROCK:
+                round_winner = u2['user_id']
+            else:
+                round_winner = u1['user_id']
+
+        # update round winner
+        battle_round['round_winner'] = round_winner
+        battle_round['round_damage'] = self._random_battle_round_damage()
+        battle.log['rounds'][str(battle.current_round)] = battle_round
+        flag_modified(battle, 'log')
+
+    def _generate_battle_round_info(
+        self,
+        battle: m.Battle
+    ) -> tuple[t.Sequence[int], dict[str, t.Any]]:
+        #TODO Refactoring
+        battle_round: dict[str, t.Union[list[dict[str, int]], int]] = (
+            battle.log['rounds'][str(battle.current_round)]
+        )
+        user_ids = [
+            item['user_id']
+            for item in battle_round['answers']
+        ]
+        payload = self._get_battle_round_info(battle.current_round, battle_round)
+
+        return user_ids, payload
+
+    @staticmethod
+    def _get_battle_round_info(
+        round_id: t.Union[int, str],
+        battle_round: dict[str, t.Union[list[dict[str, int]], int]]
+    ) -> dict[str, t.Any]:
+        return {
+            'roundId': int(round_id),
+            'roundWinner': {
+                'userId': battle_round['round_winner'],
+            },
+            'roundDamage': battle_round['round_damage'],
+            'answers': [
+                {
+                    'userId': item['user_id'],
+                    'choice': item['choice'],
+                }
+                for item in battle_round['answers']
+            ],
+        }
+
+    def _update_battle_winner(self, battle: m.Battle) -> None:
+        #TODO Refactoring
+        user_ids = list(battle.log['users'].values())
+        users = {
+            user_id: settings.BATTLE_USER_HP
+            for user_id in user_ids
+        }
+
+        battle_rounds: dict[str, dict[str, t.Union[list[dict[str, int]], int]]] = battle.log['rounds']
+        for battle_round in battle_rounds.values():
+            if battle_round['round_winner'] is None:
+                continue
+
+            user_id = user_ids[1] if battle_round['round_winner'] == user_ids[0] else user_ids[0]
+            # update user hp
+            users[user_id] -= battle_round['round_damage']
+
+        battle_winner = None
+        for user_id, user_hp in users.items():
+            if user_hp <= 0:
+                battle_winner = user_ids[1] if user_id == user_ids[0] else user_ids[0]
+                break
+
+        if battle_winner is not None:
+            battle.log['winner'] = {
+                'user_id': battle_winner,
+            }
+            self.status = BattleStatus.FINISHED
+        else:
+            # increase battle round counter
+            battle.log['current_round'] += 1
+            self._add_empty_battle_round(battle)
+
+        flag_modified(battle, 'log')
+
+    def _generate_battle_info(self, battle: m.Battle) -> tuple[t.Sequence[int], dict[str, t.Any]]:
+        #TODO Refactoring
+        user_ids = list(battle.log['users'].values())
+        rounds = []
+        for battle_round_id, battle_round in battle.log['rounds'].items():
+            rounds.append(self._get_battle_round_info(battle_round_id, battle_round))
+
+        return user_ids, {
+            'winner': {
+                'userId': battle.log['winner']['user_id'],
+            },
+            'roundCount': battle.current_round + 1,
+            'rounds': rounds,
+        }
+
+    @staticmethod
+    def _random_battle_round_damage() -> int:
+        return randint(settings.BATTLE_USER_DAMAGE_MIN, settings.BATTLE_USER_DAMAGE_MAX)

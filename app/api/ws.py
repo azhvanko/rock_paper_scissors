@@ -10,7 +10,7 @@ from fastapi import (
 
 from app.config import settings
 from app.logging import logger
-from app.services import BattleApp
+from app.services import BattleService
 from app.ws import messenger
 
 
@@ -33,7 +33,7 @@ async def get_user_id(websocket: WebSocket) -> t.Optional[int]:
 @router.websocket("/")
 async def websocket_endpoint(
     websocket: WebSocket,
-    battle_service: BattleApp = Depends(),
+    battle_service: BattleService = Depends(),
     user_id: t.Optional[int] = Depends(get_user_id),
 ):
     if user_id is None:

@@ -1,1 +1,1 @@
-from app.services.battle import BattleApp
+from app.services.battle import BattleService
