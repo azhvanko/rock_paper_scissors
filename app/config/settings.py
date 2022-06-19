@@ -1,3 +1,6 @@
+import typing as t
+
+import structlog
 from pydantic import BaseSettings
 
 
@@ -24,41 +27,6 @@ class Settings(BaseSettings):
     BATTLE_USER_DAMAGE_MAX: int = 20
     BATTLE_USERNAME_HEADER: str = 'x-http-username'
 
-    # TODO
-    LOGGING = {
-        'version': 1,
-        'disable_existing_loggers': False,
-        'formatters': {
-            'default': {
-                'format': (
-                    '[%(asctime)s] [%(levelname)-8s] [%(name)-16s] %(message)s'
-                ),
-                'datefmt': '%d/%m/%Y %H:%M:%S',
-            },
-            'verbose': {
-                'format': (
-                    '[%(asctime)s] [%(levelname)-8s] [%(name)-16s] '
-                    '[%(module)-10s %(lineno)-4d %(funcName)-16s] %(message)s'
-                ),
-                'datefmt': '%d/%m/%Y %H:%M:%S',
-            },
-        },
-        'handlers': {
-            'console': {
-                'level': 'DEBUG' if BATTLE_DEBUG else 'INFO',
-                'class': 'logging.StreamHandler',
-                'formatter': 'verbose' if BATTLE_DEBUG else 'default',
-                'stream': 'ext://sys.stdout',
-            },
-        },
-        'loggers': {
-            '': {
-                'handlers': ['console',],
-                'level': 'DEBUG' if BATTLE_DEBUG else 'INFO',
-            },
-        },
-    }
-
     class Config:
         env_file = '.env'
 
@@ -68,6 +36,71 @@ class Settings(BaseSettings):
             f'postgresql+{self.DB_API}://{self.DB_USER}:{self.DB_USER_PASSWORD}@'
             f'{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}'
         )
+
+    @property
+    def LOGGING(self) -> dict[str, t.Any]:  # noqa
+        json_params = {
+            'ensure_ascii': False,
+            'sort_keys': True,
+        }
+        if self.BATTLE_DEBUG:
+            json_params['indent'] = 2
+
+        def add_app_context(_, __, event_dict: dict[str, t.Any]) -> dict[str, t.Any]:
+            # remove processors meta
+            event_dict.pop('_from_structlog')
+            event_dict.pop('_record')
+
+            frame, _ = structlog._frames._find_first_app_frame_and_name(['logging', __name__])  # noqa
+            event_dict['file'] = frame.f_code.co_filename
+            event_dict['line'] = frame.f_lineno
+            event_dict['function'] = frame.f_code.co_name
+
+            return event_dict
+
+        if self.BATTLE_DEBUG:
+            dev_processors = [
+                structlog.processors.ExceptionPrettyPrinter(),
+            ]
+        else:
+            dev_processors = []
+
+        processors = [
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.TimeStamper(fmt='iso'),
+            add_app_context,
+            *dev_processors,
+            structlog.processors.JSONRenderer(**json_params),
+        ]
+
+        return {
+            'version': 1,
+            'disable_existing_loggers': False,
+            'formatters': {
+                'json': {
+                    '()': structlog.stdlib.ProcessorFormatter,
+                    'processors': processors,
+                },
+            },
+            'handlers': {
+                'console': {
+                    'level': 'DEBUG' if self.BATTLE_DEBUG else 'INFO',
+                    'class': 'logging.StreamHandler',
+                    'formatter': 'json',
+                    'stream': 'ext://sys.stdout',
+                },
+            },
+            'loggers': {
+                '': {
+                    'handlers': ['console',],
+                    'level': 'DEBUG' if self.BATTLE_DEBUG else 'INFO',
+                },
+            },
+        }
 
 
 settings = Settings()

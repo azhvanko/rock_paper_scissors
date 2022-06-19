@@ -15,6 +15,7 @@ websockets = "^10.3"
 python-dotenv = "^0.20.0"
 SQLAlchemy = {extras = ["asyncio"], version = "^1.4.37"}
 asyncpg = "^0.25.0"
+structlog = "^21.5.0"
 
 [tool.poetry.dev-dependencies]
 pytest-asyncio = "^0.18.3"
